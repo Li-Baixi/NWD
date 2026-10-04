@@ -23,6 +23,19 @@ While editing is enabled:
 - 撤销本地修改 drops all unpublished changes and restores the last published content.
 - The status area always shows how many changes are waiting to be published.
 
+## Free layout editing
+
+The editor can also move, resize, hide, and add page elements:
+
+- **Move**: drag any outlined element (dashed outline on hover). Text still opens for editing on a plain click — drag more than a few pixels to move it instead. Moves are visual offsets; the page does not reflow.
+- **Select**: click a non-text element (card, icon, arrow, badge) or right-click anything to select it. A floating toolbar appears with 重置 (undo move/resize) and 删除.
+- **Resize**: drag the small handle at the element's bottom-right corner.
+- **Delete/restore**: 删除 hides an existing element; the toolbar button 已删除 (N) lists hidden elements for one-click 恢复. `Delete`/`Backspace` also removes the current selection.
+- **Add**: the 添加 ▾ menu inserts a new overlay element — 文字 / 图片 / 气泡 / 箭头 / 矩形 / 线条 — into the section at the center of the screen.
+- **Overlay elements**: drag to move, handle to resize, double-click text/bubbles to edit (per language), and use the floating toolbar for color presets, rotation, layer order (上移层 / 下移层), 复制, and 删除. Overlay images reuse the crop panel via 换图.
+
+All of the above counts toward the same "N 处修改待发布" counter and publishes with the same 发布 button. Layout state is stored as a `layout` key in `edits.json`; overlay images are committed to `assets/edits/` like other images. Visitors see the final layout but cannot interact with or move overlay elements.
+
 ## Connect GitHub (one-time setup)
 
 Publishing needs a fine-grained personal access token scoped to this repository only:

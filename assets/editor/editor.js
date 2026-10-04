@@ -52,6 +52,22 @@
   var activeImageRecord = null;
   var tokenLogin = "";
   var publishState = { phase: "idle" };
+  var moveRecords = [];
+  var overlayNodes = {};
+  var selectedLayoutTarget = null;
+  var activeOverlayText = null;
+  var imageEditTarget = null;
+  var layoutDragSuppressClick = false;
+  var layoutDragState = null;
+  var layoutResizeState = null;
+  var layoutTouched = false;
+  var inspectorBar = null;
+  var addMenu = null;
+  var hiddenPanel = null;
+  var floatingHandle = null;
+  var addElementButton = null;
+  var hiddenRestoreButton = null;
+  var colorPresets = ["#A6192E", "#2B070C", "#251A1C", "#6E6265", "#E45869", "#FFFFFF"];
   var imageState = {
     image: null,
     rawSource: "",
@@ -88,6 +104,8 @@
       '<button type="button" data-editor-lang="en">EN</button>' +
       '</div>' +
       '<button class="inline-tool-button" id="revertLocalEdits" type="button">撤销本地修改</button>' +
+      '<button class="inline-tool-button" id="addElement" type="button">添加 ▾</button>' +
+      '<button class="inline-tool-button" id="hiddenRestore" type="button" hidden>已删除</button>' +
       '<button class="inline-tool-button" id="connectGithub" type="button">连接 GitHub</button>' +
       '<button class="inline-tool-button primary" id="publishChanges" type="button">发布</button>' +
       '<button class="inline-tool-button quiet" id="closeInlineEditor" type="button">完成</button>' +
@@ -100,6 +118,8 @@
     publishButton = aside.querySelector("#publishChanges");
     revertButton = aside.querySelector("#revertLocalEdits");
     connectButton = aside.querySelector("#connectGithub");
+    addElementButton = aside.querySelector("#addElement");
+    hiddenRestoreButton = aside.querySelector("#hiddenRestore");
   }
 
   function buildImagePanel() {
@@ -231,7 +251,7 @@
     return String(value).replace(/[^a-zA-Z0-9_-]/g, "\\$&");
   }
 
-  function keyForText(element) {
+  function computeElementKey(element) {
     var owner = null;
     if (element.id) owner = element.id;
     if (!owner) {
@@ -249,7 +269,39 @@
     var index = Array.prototype.indexOf.call(bucket, element);
     if (index < 0) index = Array.prototype.indexOf.call(document.querySelectorAll(tag), element);
     if (index < 0) index = 0;
-    return "text:" + owner + ":" + tag + ":" + cls + ":" + index;
+    return owner + ":" + tag + ":" + cls + ":" + index;
+  }
+
+  function keyForText(element) {
+    return "text:" + computeElementKey(element);
+  }
+
+  function keyForElement(element) {
+    var existing = element.getAttribute("data-editor-key");
+    if (existing) return existing;
+    return "el:" + computeElementKey(element);
+  }
+
+  function isMoveExcluded(element) {
+    if (!element || !element.closest) return true;
+    if (element.closest(".growth-side, .application-panel, .skip-link")) return true;
+    return Boolean(element.closest("#siteEditor, #inlineImageEditor, #inlineTokenPanel, #layoutInspector, #addElementMenu, #hiddenRestorePanel, #jobGrid, #detailMain, #detailMeta, script, style, nav, .site-header, .mobile-menu, form, .jobs-toolbar, .search-row, .filters-row"));
+  }
+
+  function buildMoveCatalog() {
+    moveRecords = [];
+    var candidates = document.querySelectorAll("main *, footer *");
+    Array.prototype.forEach.call(candidates, function (element) {
+      if (element.hasAttribute("data-editor-key")) return;
+      if (element.hasAttribute("data-move-key")) return;
+      if (element.closest(".nwd-ov")) return;
+      if (isMoveExcluded(element)) return;
+      var key = keyForElement(element);
+      element.setAttribute("data-move-key", key);
+      var label = (element.textContent || "").trim().replace(/\s+/g, " ").slice(0, 38);
+      if (!label) label = element.tagName.toLowerCase() + (element.classList && element.classList.length ? "." + element.classList[0] : "");
+      moveRecords.push({ key: key, label: label, element: element });
+    });
   }
 
   function buildCatalog() {
@@ -286,6 +338,8 @@
         baselines: {}
       });
     });
+
+    buildMoveCatalog();
 
     captureBaseline(activeLang);
   }
@@ -364,7 +418,7 @@
       window.localStorage.setItem(storageKey, JSON.stringify(edits));
       return true;
     } catch (error) {
-      setStatus("浏览器存储空间不足，请先发布到 GitHub。", "error");
+      setStatus("浏览器存储空间不足：如果刚添加了大图片，请先发布到 GitHub，或换小一点的图片再试。", "error");
       return false;
     }
   }
@@ -410,6 +464,13 @@
       });
       if (Object.keys(diff).length) result[lang] = diff;
     });
+    if (layoutTouched || edits.layout) {
+      var localLayout = normalizeLayout(edits.layout || null);
+      var remoteLayout = normalizeLayout(remoteEdits.layout || null);
+      if (stableStringify(localLayout) !== stableStringify(remoteLayout)) {
+        result.layout = JSON.parse(JSON.stringify(localLayout));
+      }
+    }
     return result;
   }
 
@@ -417,8 +478,10 @@
     var changeSet = buildChangeSet();
     var total = 0;
     Object.keys(changeSet).forEach(function (lang) {
+      if (lang === "layout") return;
       total += Object.keys(changeSet[lang]).length;
     });
+    total += countLayoutChanges(normalizeLayout(edits.layout || null), normalizeLayout(remoteEdits.layout || null));
     return total;
   }
 
@@ -437,6 +500,9 @@
       publishButton.classList.toggle("is-busy", busy);
     }
     if (revertButton) revertButton.disabled = busy;
+    if (addElementButton) addElementButton.disabled = busy;
+    if (hiddenRestoreButton) hiddenRestoreButton.disabled = busy;
+    if (inspectorBar) inspectorBar.classList.toggle("is-locked", busy);
     document.querySelectorAll("[data-editor-lang]").forEach(function (button) {
       button.disabled = busy;
     });
@@ -511,6 +577,15 @@
 
   function loadImageSource(source) {
     return new Promise(function (resolve) {
+      if (!source) {
+        imageState.rawSource = "";
+        imageCurrentPreview.removeAttribute("src");
+        imageOutputPreview.removeAttribute("src");
+        cropStage.hidden = true;
+        setImageError("");
+        resolve({ ok: false });
+        return;
+      }
       var image = new Image();
       if (/^https?:/.test(source)) image.crossOrigin = "anonymous";
       image.onload = function () {
@@ -664,6 +739,7 @@
 
   function closeImageEditor() {
     activeImageRecord = null;
+    imageEditTarget = null;
     imagePanel.hidden = true;
     imagePanel.classList.remove("is-open");
     imagePanel.setAttribute("aria-hidden", "true");
@@ -671,7 +747,19 @@
   }
 
   function applyImageValue(value) {
-    if (!activeImageRecord || !value) return;
+    if (!value) return;
+    if (imageEditTarget) {
+      var overlaySpec = overlaySpecForEdit(imageEditTarget.overlayId);
+      if (overlaySpec) {
+        overlaySpec.src = value;
+        updateOverlayElement(overlaySpec);
+        writeLocalEdits();
+        updateStatus();
+      }
+      closeImageEditor();
+      return;
+    }
+    if (!activeImageRecord) return;
     edits[activeLang] = edits[activeLang] || {};
     edits[activeLang][activeImageRecord.key] = value;
     writeLocalEdits();
@@ -696,6 +784,7 @@
     setLangButtons();
     captureBaseline(activeLang);
     applyEdits();
+    applyLayout();
   }
 
   function restoreEditsBeforeLanguageSwitch(lang) {
@@ -706,6 +795,847 @@
         setLeafText(record.element, record.baselines[lang]);
       }
     });
+  }
+
+  /* ---------- layout editing: state ---------- */
+
+  function normalizeLayout(value) {
+    var result = { moves: {}, sizes: {}, hidden: [], elements: [] };
+    if (!value || typeof value !== "object") return result;
+    if (value.moves && typeof value.moves === "object") {
+      Object.keys(value.moves).forEach(function (key) {
+        var m = value.moves[key];
+        if (!m || typeof m !== "object") return;
+        var dx = Math.round(Number(m.dx) || 0);
+        var dy = Math.round(Number(m.dy) || 0);
+        if (dx || dy) result.moves[key] = { dx: dx, dy: dy };
+      });
+    }
+    if (value.sizes && typeof value.sizes === "object") {
+      Object.keys(value.sizes).forEach(function (key) {
+        var s = value.sizes[key];
+        if (!s || typeof s !== "object") return;
+        var w = Math.round(Number(s.w) || 0);
+        var h = Math.round(Number(s.h) || 0);
+        if (w > 0 || h > 0) result.sizes[key] = { w: w, h: h };
+      });
+    }
+    if (Array.isArray(value.hidden)) {
+      value.hidden.forEach(function (key) {
+        if (typeof key === "string" && result.hidden.indexOf(key) === -1) result.hidden.push(key);
+      });
+    }
+    if (Array.isArray(value.elements)) {
+      value.elements.forEach(function (el) {
+        if (!el || typeof el !== "object") return;
+        if (!el.id || !el.type || !el.anchor) return;
+        var spec = {
+          id: String(el.id),
+          type: String(el.type),
+          anchor: String(el.anchor),
+          x: Math.round(Number(el.x) || 0),
+          y: Math.round(Number(el.y) || 0),
+          w: Math.max(8, Math.round(Number(el.w) || 100)),
+          h: Math.max(4, Math.round(Number(el.h) || 40)),
+          z: Math.min(99, Math.max(1, Math.round(Number(el.z) || 6)))
+        };
+        if (el.color) spec.color = String(el.color);
+        if (el.rot) spec.rot = Number(el.rot) || 0;
+        if (typeof el.src === "string" && el.src) spec.src = el.src;
+        if (el.text && typeof el.text === "object") {
+          spec.text = {};
+          supportedLangs.forEach(function (lang) {
+            if (typeof el.text[lang] === "string") spec.text[lang] = el.text[lang];
+          });
+        }
+        result.elements.push(spec);
+      });
+    }
+    return result;
+  }
+
+  function effectiveLayout() {
+    if (edits.layout) return edits.layout;
+    return normalizeLayout(remoteEdits.layout || null);
+  }
+
+  function ensureLayout() {
+    if (!edits.layout) edits.layout = normalizeLayout(remoteEdits.layout || null);
+    layoutTouched = true;
+    return edits.layout;
+  }
+
+  function layoutSpecById(id) {
+    var layout = effectiveLayout();
+    for (var i = 0; i < layout.elements.length; i += 1) {
+      if (layout.elements[i].id === id) return layout.elements[i];
+    }
+    return null;
+  }
+
+  function overlaySpecForEdit(id) {
+    var layout = ensureLayout();
+    for (var i = 0; i < layout.elements.length; i += 1) {
+      if (layout.elements[i].id === id) return layout.elements[i];
+    }
+    return null;
+  }
+
+  function generateOverlayId() {
+    var layout = effectiveLayout();
+    var id;
+    do {
+      id = "e-" + Math.random().toString(16).slice(2, 8);
+    } while (layout.elements.some(function (el) { return el.id === id; }));
+    return id;
+  }
+
+  function countLayoutChanges(local, remote) {
+    var total = 0;
+    Object.keys(local.moves).forEach(function (k) {
+      var r = remote.moves[k];
+      if (!r || r.dx !== local.moves[k].dx || r.dy !== local.moves[k].dy) total += 1;
+    });
+    Object.keys(remote.moves).forEach(function (k) { if (!local.moves[k]) total += 1; });
+    Object.keys(local.sizes).forEach(function (k) {
+      var r = remote.sizes[k];
+      if (!r || r.w !== local.sizes[k].w || r.h !== local.sizes[k].h) total += 1;
+    });
+    Object.keys(remote.sizes).forEach(function (k) { if (!local.sizes[k]) total += 1; });
+    local.hidden.forEach(function (k) { if (remote.hidden.indexOf(k) === -1) total += 1; });
+    remote.hidden.forEach(function (k) { if (local.hidden.indexOf(k) === -1) total += 1; });
+    var remoteById = {};
+    remote.elements.forEach(function (el) { remoteById[el.id] = el; });
+    var localIds = {};
+    local.elements.forEach(function (el) {
+      localIds[el.id] = true;
+      if (!remoteById[el.id] || stableStringify(remoteById[el.id]) !== stableStringify(el)) total += 1;
+    });
+    remote.elements.forEach(function (el) { if (!localIds[el.id]) total += 1; });
+    return total;
+  }
+
+  /* ---------- layout editing: anchors & rendering (visitors too) ---------- */
+
+  function resolveAnchor(anchor) {
+    if (!anchor) return null;
+    if (anchor.charAt(0) === "@") {
+      var parts = anchor.slice(1).split(":");
+      if (parts.length < 2) return null;
+      try {
+        return document.querySelector("#" + escapeSelector(parts[0]) + " > section." + escapeSelector(parts.slice(1).join(":")));
+      } catch (error) {
+        return null;
+      }
+    }
+    return document.getElementById(anchor);
+  }
+
+  function anchorForSection(section) {
+    if (section.id) return section.id;
+    var view = section.closest(".view");
+    var viewId = view && view.id ? view.id : "";
+    var cls = section.classList && section.classList.length ? section.classList[0] : section.tagName.toLowerCase();
+    return "@" + viewId + ":" + cls;
+  }
+
+  function anchorForPoint(x, y) {
+    var probe = document.elementFromPoint(x, y);
+    var section = probe && probe.closest ? probe.closest("main section") : null;
+    if (!section) section = document.querySelector(".view.active section");
+    if (!section) section = document.querySelector("main section");
+    if (!section) return null;
+    return { section: section, anchor: anchorForSection(section) };
+  }
+
+  function overlayTextFor(spec) {
+    if (!spec.text) return "";
+    return spec.text[activeLang] || spec.text["zh-CN"] || spec.text["en"] || "";
+  }
+
+  function styleOverlayNode(node, spec) {
+    node.style.left = spec.x + "px";
+    node.style.top = spec.y + "px";
+    node.style.width = spec.w + "px";
+    node.style.height = spec.h + "px";
+    node.style.zIndex = String(spec.z);
+    node.style.transform = spec.rot ? "rotate(" + spec.rot + "deg)" : "";
+    if (spec.type === "text") {
+      if (spec.color) node.style.color = spec.color;
+      else node.style.removeProperty("color");
+    } else if (spec.type === "bubble" || spec.type === "arrow" || spec.type === "rect" || spec.type === "line") {
+      if (spec.color) node.style.setProperty("--ov-color", spec.color);
+      else node.style.removeProperty("--ov-color");
+    }
+  }
+
+  function renderOverlayElement(spec) {
+    var section = resolveAnchor(spec.anchor);
+    if (!section) return null;
+    var node = document.createElement("div");
+    node.className = "nwd-ov nwd-ov-" + spec.type;
+    node.setAttribute("data-ov-id", spec.id);
+    styleOverlayNode(node, spec);
+    if (spec.type === "image") {
+      var img = document.createElement("img");
+      img.alt = "";
+      img.src = spec.src || "";
+      node.appendChild(img);
+    } else if (spec.type === "text" || spec.type === "bubble") {
+      node.textContent = overlayTextFor(spec);
+    }
+    section.appendChild(node);
+    overlayNodes[spec.id] = node;
+    return node;
+  }
+
+  function updateOverlayElement(spec) {
+    var node = overlayNodes[spec.id];
+    if (!node) return;
+    styleOverlayNode(node, spec);
+    if (spec.type === "image") {
+      var img = node.querySelector("img");
+      if (!img) {
+        img = document.createElement("img");
+        img.alt = "";
+        node.appendChild(img);
+      }
+      if (img.getAttribute("src") !== spec.src) img.src = spec.src || "";
+    } else if (spec.type === "text" || spec.type === "bubble") {
+      if (!(activeOverlayText && activeOverlayText.spec === spec)) {
+        node.textContent = overlayTextFor(spec);
+      }
+    }
+  }
+
+  function applyLayout() {
+    var layout = effectiveLayout();
+
+    var needed = {};
+    layout.elements.forEach(function (spec) { needed[spec.anchor] = true; });
+    document.querySelectorAll("main .view section").forEach(function (section) {
+      var anchor = anchorForSection(section);
+      if (needed[anchor]) {
+        if (getComputedStyle(section).position === "static") {
+          section.style.position = "relative";
+          section.setAttribute("data-ed-layout-host", "");
+        }
+      } else if (section.hasAttribute("data-ed-layout-host")) {
+        section.removeAttribute("data-ed-layout-host");
+        section.style.removeProperty("position");
+      }
+    });
+
+    document.querySelectorAll("main [data-editor-key], main [data-move-key], footer [data-editor-key], footer [data-move-key]").forEach(function (element) {
+      var key = element.getAttribute("data-editor-key") || element.getAttribute("data-move-key");
+      var move = layout.moves[key];
+      if (move) element.style.translate = move.dx + "px " + move.dy + "px";
+      else element.style.removeProperty("translate");
+      var size = layout.sizes[key];
+      if (size) {
+        if (size.w) element.style.width = size.w + "px";
+        if (size.h) element.style.height = size.h + "px";
+      } else {
+        element.style.removeProperty("width");
+        element.style.removeProperty("height");
+      }
+      element.classList.toggle("ed-layout-hidden", layout.hidden.indexOf(key) !== -1);
+    });
+
+    var live = {};
+    layout.elements.forEach(function (spec) {
+      live[spec.id] = true;
+      if (overlayNodes[spec.id]) updateOverlayElement(spec);
+      else renderOverlayElement(spec);
+    });
+    Object.keys(overlayNodes).forEach(function (id) {
+      if (!live[id]) {
+        overlayNodes[id].remove();
+        delete overlayNodes[id];
+        if (selectedLayoutTarget && selectedLayoutTarget.kind === "overlay" && selectedLayoutTarget.id === id) clearLayoutSelection();
+      }
+    });
+    updateLayoutButtons();
+  }
+
+  function applyAll() {
+    applyEdits();
+    applyLayout();
+  }
+
+  function updateLayoutButtons() {
+    if (!hiddenRestoreButton) return;
+    var layout = effectiveLayout();
+    var n = layout.hidden.length;
+    hiddenRestoreButton.hidden = !editingEnabled || n === 0;
+    hiddenRestoreButton.textContent = "已删除 (" + n + ")";
+  }
+
+  /* ---------- layout editing: selection & inspector ---------- */
+
+  function buildLayoutUI() {
+    inspectorBar = document.createElement("div");
+    inspectorBar.id = "layoutInspector";
+    inspectorBar.setAttribute("hidden", "");
+    document.body.appendChild(inspectorBar);
+
+    addMenu = document.createElement("div");
+    addMenu.id = "addElementMenu";
+    addMenu.setAttribute("hidden", "");
+    [["text", "文字"], ["image", "图片"], ["bubble", "气泡"], ["arrow", "箭头"], ["rect", "矩形"], ["line", "线条"]].forEach(function (pair) {
+      var item = document.createElement("button");
+      item.type = "button";
+      item.setAttribute("data-add-type", pair[0]);
+      item.textContent = pair[1];
+      addMenu.appendChild(item);
+    });
+    document.body.appendChild(addMenu);
+
+    hiddenPanel = document.createElement("div");
+    hiddenPanel.id = "hiddenRestorePanel";
+    hiddenPanel.setAttribute("hidden", "");
+    document.body.appendChild(hiddenPanel);
+
+    floatingHandle = document.createElement("div");
+    floatingHandle.className = "nwd-handle is-floating";
+    floatingHandle.setAttribute("hidden", "");
+    document.body.appendChild(floatingHandle);
+  }
+
+  function appendInspectorButton(label, onClick) {
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "inline-tool-button";
+    button.textContent = label;
+    button.addEventListener("click", onClick);
+    inspectorBar.appendChild(button);
+    return button;
+  }
+
+  function appendInspectorHint(text) {
+    var span = document.createElement("span");
+    span.className = "inspector-hint";
+    span.textContent = text;
+    inspectorBar.appendChild(span);
+  }
+
+  function selectLayoutTarget(target) {
+    if (publishState.phase !== "idle") return;
+    if (activeTextRecord) commitTextEditing(true);
+    if (activeOverlayText) commitOverlayTextEditing(true);
+    clearLayoutSelection();
+    var element = target.kind === "overlay" ? overlayNodes[target.id] : target.element;
+    if (!element) return;
+    selectedLayoutTarget = target;
+    element.classList.add("is-layout-selected");
+    renderInspector();
+    attachResizeHandle();
+    positionInspector();
+  }
+
+  function clearLayoutSelection() {
+    detachResizeHandle();
+    if (selectedLayoutTarget) {
+      var element = selectedLayoutTarget.kind === "overlay" ? overlayNodes[selectedLayoutTarget.id] : selectedLayoutTarget.element;
+      if (element) element.classList.remove("is-layout-selected");
+    }
+    selectedLayoutTarget = null;
+    if (inspectorBar) inspectorBar.hidden = true;
+  }
+
+  function positionInspector() {
+    if (!selectedLayoutTarget || !inspectorBar || inspectorBar.hidden) return;
+    var element = selectedLayoutTarget.kind === "overlay" ? overlayNodes[selectedLayoutTarget.id] : selectedLayoutTarget.element;
+    if (!element) return;
+    var rect = element.getBoundingClientRect();
+    var width = inspectorBar.offsetWidth || 320;
+    var height = inspectorBar.offsetHeight || 44;
+    var left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+    var top = rect.top > height + 12 ? rect.top - height - 10 : Math.min(rect.bottom + 10, window.innerHeight - height - 8);
+    inspectorBar.style.left = left + "px";
+    inspectorBar.style.top = Math.max(8, top) + "px";
+  }
+
+  function renderInspector() {
+    if (!selectedLayoutTarget) { inspectorBar.hidden = true; return; }
+    inspectorBar.innerHTML = "";
+    if (selectedLayoutTarget.kind === "existing") {
+      var key = selectedLayoutTarget.key;
+      appendInspectorButton("重置", function () { resetExistingElement(key); });
+      appendInspectorButton("删除", function () { deleteSelectedLayoutTarget(); });
+      appendInspectorHint("拖动移动 · 手柄调大小");
+      inspectorBar.hidden = false;
+      return;
+    }
+    var spec = overlaySpecForEdit(selectedLayoutTarget.id);
+    if (!spec) { clearLayoutSelection(); return; }
+    if (spec.type === "text" || spec.type === "bubble") {
+      appendInspectorButton("编辑文字", function () { openOverlayTextEditing(spec); });
+    }
+    if (spec.type === "image") {
+      appendInspectorButton("换图", function () { openOverlayImageEditor(spec); });
+    }
+    var swatchRow = document.createElement("span");
+    swatchRow.className = "nwd-swatch-row";
+    colorPresets.forEach(function (color) {
+      var swatch = document.createElement("button");
+      swatch.type = "button";
+      swatch.className = "nwd-swatch";
+      swatch.style.background = color;
+      swatch.title = color;
+      swatch.addEventListener("click", function () {
+        spec.color = color;
+        writeLocalEdits();
+        updateStatus();
+        updateOverlayElement(spec);
+        renderInspector();
+        positionInspector();
+      });
+      swatchRow.appendChild(swatch);
+    });
+    inspectorBar.appendChild(swatchRow);
+    if (spec.type === "arrow" || spec.type === "line" || spec.type === "rect") {
+      appendInspectorButton("旋转", function () {
+        spec.rot = ((spec.rot || 0) + 45) % 360;
+        writeLocalEdits(); updateStatus(); updateOverlayElement(spec); positionInspector();
+      });
+    }
+    appendInspectorButton("上移层", function () {
+      spec.z = Math.min(99, (spec.z || 6) + 1);
+      writeLocalEdits(); updateStatus(); updateOverlayElement(spec);
+    });
+    appendInspectorButton("下移层", function () {
+      spec.z = Math.max(1, (spec.z || 6) - 1);
+      writeLocalEdits(); updateStatus(); updateOverlayElement(spec);
+    });
+    appendInspectorButton("复制", function () { duplicateOverlayElement(spec); });
+    appendInspectorButton("删除", function () { deleteSelectedLayoutTarget(); });
+    inspectorBar.hidden = false;
+  }
+
+  function resetExistingElement(key) {
+    if (!edits.layout) {
+      setStatus("该元素没有本地调整。", "ok");
+      return;
+    }
+    delete edits.layout.moves[key];
+    delete edits.layout.sizes[key];
+    clearLayoutSelection();
+    writeLocalEdits();
+    updateStatus();
+    applyLayout();
+  }
+
+  function deleteSelectedLayoutTarget() {
+    if (!selectedLayoutTarget || publishState.phase !== "idle") return;
+    if (selectedLayoutTarget.kind === "overlay") {
+      var layout = ensureLayout();
+      var removedId = selectedLayoutTarget.id;
+      layout.elements = layout.elements.filter(function (el) { return el.id !== removedId; });
+      clearLayoutSelection();
+      writeLocalEdits();
+      updateStatus();
+      applyLayout();
+      setStatus("叠加元素已删除。", "ok");
+      return;
+    }
+    var existingLayout = ensureLayout();
+    var existingKey = selectedLayoutTarget.key;
+    if (existingLayout.hidden.indexOf(existingKey) === -1) existingLayout.hidden.push(existingKey);
+    clearLayoutSelection();
+    writeLocalEdits();
+    updateStatus();
+    applyLayout();
+    setStatus("元素已删除，可在“已删除”面板恢复。", "ok");
+  }
+
+  function duplicateOverlayElement(spec) {
+    var layout = ensureLayout();
+    var copy = JSON.parse(JSON.stringify(spec));
+    copy.id = generateOverlayId();
+    copy.x += 16;
+    copy.y += 16;
+    layout.elements.push(copy);
+    writeLocalEdits();
+    updateStatus();
+    applyLayout();
+    selectLayoutTarget({ kind: "overlay", id: copy.id });
+  }
+
+  /* ---------- layout editing: resize handle ---------- */
+
+  function attachResizeHandle() {
+    if (!selectedLayoutTarget) return;
+    if (selectedLayoutTarget.kind === "overlay") {
+      var node = overlayNodes[selectedLayoutTarget.id];
+      if (!node) return;
+      if (!node.querySelector(":scope > .nwd-handle")) {
+        var handle = document.createElement("div");
+        handle.className = "nwd-handle";
+        node.appendChild(handle);
+      }
+    } else {
+      floatingHandle.hidden = false;
+      positionFloatingHandle();
+    }
+  }
+
+  function positionFloatingHandle() {
+    if (!selectedLayoutTarget || floatingHandle.hidden) return;
+    var element = selectedLayoutTarget.element;
+    if (!element) return;
+    var rect = element.getBoundingClientRect();
+    floatingHandle.style.left = (rect.right - 7) + "px";
+    floatingHandle.style.top = (rect.bottom - 7) + "px";
+  }
+
+  function detachResizeHandle() {
+    if (selectedLayoutTarget && selectedLayoutTarget.kind === "overlay") {
+      var node = overlayNodes[selectedLayoutTarget.id];
+      if (node) {
+        var handle = node.querySelector(":scope > .nwd-handle");
+        if (handle) handle.remove();
+      }
+    }
+    if (floatingHandle) floatingHandle.hidden = true;
+  }
+
+  /* ---------- layout editing: add menu & hidden panel ---------- */
+
+  function closeAddElementMenu() {
+    if (addMenu) addMenu.hidden = true;
+  }
+
+  function toggleAddElementMenu() {
+    if (addMenu.hidden) {
+      var rect = addElementButton.getBoundingClientRect();
+      addMenu.style.left = Math.max(8, rect.left) + "px";
+      addMenu.style.bottom = (window.innerHeight - rect.top + 10) + "px";
+      addMenu.hidden = false;
+    } else {
+      addMenu.hidden = true;
+    }
+  }
+
+  function closeHiddenRestorePanel() {
+    if (hiddenPanel) hiddenPanel.hidden = true;
+  }
+
+  function createOverlayElement(type) {
+    var point = anchorForPoint(window.innerWidth / 2, window.innerHeight / 2);
+    if (!point) {
+      setStatus("找不到可插入的版块。", "error");
+      return;
+    }
+    var defaults = { text: [240, 64], bubble: [260, 110], rect: [220, 140], line: [160, 3], arrow: [150, 26], image: [320, 200] }[type] || [200, 80];
+    var rect = point.section.getBoundingClientRect();
+    var spec = {
+      id: generateOverlayId(),
+      type: type,
+      anchor: point.anchor,
+      x: Math.max(0, Math.round(window.innerWidth / 2 - rect.left - defaults[0] / 2)),
+      y: Math.max(0, Math.round(window.innerHeight / 2 - rect.top - defaults[1] / 2)),
+      w: defaults[0],
+      h: defaults[1],
+      z: 6,
+      rot: 0
+    };
+    if (type === "text" || type === "bubble") {
+      spec.text = {};
+      supportedLangs.forEach(function (lang) {
+        spec.text[lang] = type === "bubble" ? "双击编辑气泡文字" : "双击编辑文字";
+      });
+    }
+    var layout = ensureLayout();
+    layout.elements.push(spec);
+    writeLocalEdits();
+    updateStatus();
+    applyLayout();
+    selectLayoutTarget({ kind: "overlay", id: spec.id });
+    if (type === "image") openOverlayImageEditor(spec);
+    else if (type === "text" || type === "bubble") openOverlayTextEditing(spec);
+    closeAddElementMenu();
+  }
+
+  function renderHiddenRestorePanel() {
+    var layout = effectiveLayout();
+    hiddenPanel.innerHTML = "";
+    var title = document.createElement("h3");
+    title.textContent = "已删除的元素";
+    hiddenPanel.appendChild(title);
+    if (!layout.hidden.length) {
+      var empty = document.createElement("p");
+      empty.className = "inline-sync-note";
+      empty.textContent = "当前没有已删除的元素。";
+      hiddenPanel.appendChild(empty);
+    }
+    layout.hidden.forEach(function (key) {
+      var row = document.createElement("div");
+      row.className = "hidden-restore-row";
+      var label = document.createElement("span");
+      var record = moveRecords.find(function (item) { return item.key === key; });
+      label.textContent = record ? record.label : key;
+      var restore = document.createElement("button");
+      restore.type = "button";
+      restore.textContent = "恢复";
+      restore.addEventListener("click", function () {
+        var editLayout = ensureLayout();
+        editLayout.hidden = editLayout.hidden.filter(function (item) { return item !== key; });
+        writeLocalEdits();
+        updateStatus();
+        applyLayout();
+        renderHiddenRestorePanel();
+      });
+      row.appendChild(label);
+      row.appendChild(restore);
+      hiddenPanel.appendChild(row);
+    });
+    var closeRow = document.createElement("div");
+    closeRow.className = "inline-sync-actions";
+    var close = document.createElement("button");
+    close.type = "button";
+    close.textContent = "关闭";
+    close.addEventListener("click", closeHiddenRestorePanel);
+    closeRow.appendChild(close);
+    hiddenPanel.appendChild(closeRow);
+    var rect = hiddenRestoreButton.getBoundingClientRect();
+    hiddenPanel.style.left = Math.max(8, rect.left) + "px";
+    hiddenPanel.style.bottom = (window.innerHeight - rect.top + 10) + "px";
+    hiddenPanel.hidden = false;
+  }
+
+  /* ---------- layout editing: overlay text & image editing ---------- */
+
+  function openOverlayTextEditing(spec) {
+    var node = overlayNodes[spec.id];
+    if (!node) return;
+    closeImageEditor();
+    if (activeTextRecord) commitTextEditing(true);
+    if (activeOverlayText && activeOverlayText.spec !== spec) commitOverlayTextEditing(true);
+    var saved = spec.text && spec.text[activeLang] !== undefined ? spec.text[activeLang] : "";
+    activeOverlayText = { spec: spec, node: node, saved: saved };
+    node.setAttribute("contenteditable", "plaintext-only");
+    node.focus();
+    focusEnd(node);
+    setStatus("正在编辑叠加文字，点击空白保存，Esc 取消。");
+  }
+
+  function commitOverlayTextEditing(save) {
+    if (!activeOverlayText) return;
+    var record = activeOverlayText;
+    activeOverlayText = null;
+    var value = record.node.textContent || "";
+    record.node.removeAttribute("contenteditable");
+    if (save) {
+      var spec = overlaySpecForEdit(record.spec.id);
+      if (spec) {
+        spec.text = spec.text || {};
+        spec.text[activeLang] = value;
+        writeLocalEdits();
+        updateStatus();
+      }
+    } else {
+      record.node.textContent = record.saved;
+    }
+  }
+
+  function openOverlayImageEditor(spec) {
+    var node = overlayNodes[spec.id];
+    if (!node) return;
+    if (activeOverlayText) commitOverlayTextEditing(true);
+    imageEditTarget = { overlayId: spec.id };
+    var record = {
+      key: "ov:" + spec.id,
+      label: "叠加图片",
+      element: node.querySelector("img"),
+      initial: spec.src || "",
+      slotRatio: spec.w > 0 && spec.h > 0 ? spec.w / spec.h : 16 / 10
+    };
+    openImageEditor(record);
+  }
+
+  /* ---------- layout editing: drag & resize controller ---------- */
+
+  function onLayoutPointerDown(event) {
+    layoutDragSuppressClick = false;
+    if (!editingEnabled || publishState.phase !== "idle") return;
+    if (event.button !== 0 && event.pointerType === "mouse") return;
+    var target = event.target;
+    if (!target || !target.closest) return;
+    if (target.closest("#siteEditor, #inlineImageEditor, #inlineTokenPanel, #layoutInspector, #addElementMenu, #hiddenRestorePanel, .nwd-handle")) return;
+    if (target.closest("[contenteditable]")) return;
+    var overlayNode = target.closest(".nwd-ov");
+    var moveTarget = overlayNode || target.closest("[data-editor-key], [data-move-key]");
+    if (!moveTarget) return;
+    if (overlayNode && !layoutSpecById(overlayNode.getAttribute("data-ov-id"))) return;
+    if (!overlayNode) event.preventDefault();
+    layoutDragState = {
+      target: moveTarget,
+      kind: overlayNode ? "overlay" : "existing",
+      key: overlayNode ? null : (moveTarget.getAttribute("data-editor-key") || moveTarget.getAttribute("data-move-key")),
+      overlayId: overlayNode ? overlayNode.getAttribute("data-ov-id") : null,
+      startX: event.clientX,
+      startY: event.clientY,
+      dragging: false,
+      dx: 0,
+      dy: 0
+    };
+    if (layoutDragState.kind === "existing") {
+      var effective = edits.layout && edits.layout.moves ? edits.layout.moves[layoutDragState.key] : null;
+      layoutDragState.baseDx = (effective && effective.dx) || 0;
+      layoutDragState.baseDy = (effective && effective.dy) || 0;
+    }
+    try { moveTarget.setPointerCapture(event.pointerId); } catch (error) {}
+  }
+
+  function onLayoutPointerMove(event) {
+    if (layoutResizeState) {
+      applyResizeLive(event);
+      return;
+    }
+    if (!layoutDragState) return;
+    var dx = event.clientX - layoutDragState.startX;
+    var dy = event.clientY - layoutDragState.startY;
+    if (!layoutDragState.dragging) {
+      if (Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
+      layoutDragState.dragging = true;
+      document.documentElement.classList.add("is-layout-dragging");
+      try { window.getSelection().removeAllRanges(); } catch (error) {}
+    }
+    layoutDragState.dx = dx;
+    layoutDragState.dy = dy;
+    if (layoutDragState.kind === "existing") {
+      layoutDragState.target.style.translate = (layoutDragState.baseDx + dx) + "px " + (layoutDragState.baseDy + dy) + "px";
+    } else {
+      var spec = layoutSpecById(layoutDragState.overlayId);
+      var node = overlayNodes[layoutDragState.overlayId];
+      if (spec && node) {
+        node.style.left = (spec.x + dx) + "px";
+        node.style.top = (spec.y + dy) + "px";
+      }
+    }
+    if (selectedLayoutTarget) positionInspector();
+    if (selectedLayoutTarget && selectedLayoutTarget.kind === "existing") positionFloatingHandle();
+  }
+
+  function onLayoutPointerUp(event) {
+    if (layoutResizeState) {
+      commitResize(event);
+      return;
+    }
+    if (!layoutDragState) return;
+    var state = layoutDragState;
+    layoutDragState = null;
+    document.documentElement.classList.remove("is-layout-dragging");
+    try {
+      if (state.target.hasPointerCapture(event.pointerId)) state.target.releasePointerCapture(event.pointerId);
+    } catch (error) {}
+    if (!state.dragging) return;
+    layoutDragSuppressClick = true;
+    if (state.kind === "existing") {
+      var dx = Math.round(state.baseDx + (event.clientX - state.startX));
+      var dy = Math.round(state.baseDy + (event.clientY - state.startY));
+      var layout = ensureLayout();
+      if (dx || dy) layout.moves[state.key] = { dx: dx, dy: dy };
+      else delete layout.moves[state.key];
+      writeLocalEdits();
+      updateStatus();
+      selectLayoutTarget({ kind: "existing", key: state.key, element: state.target });
+    } else {
+      var layout2 = ensureLayout();
+      var spec = layout2.elements.find(function (el) { return el.id === state.overlayId; });
+      if (spec) {
+        spec.x = Math.round(spec.x + state.dx);
+        spec.y = Math.round(spec.y + state.dy);
+      }
+      writeLocalEdits();
+      updateStatus();
+      selectLayoutTarget({ kind: "overlay", id: state.overlayId });
+    }
+  }
+
+  function onLayoutPointerCancel(event) {
+    if (layoutDragState && layoutDragState.dragging) {
+      var state = layoutDragState;
+      if (state.kind === "existing") {
+        state.target.style.translate = state.baseDx + "px " + state.baseDy + "px";
+      } else {
+        var spec = layoutSpecById(state.overlayId);
+        var node = overlayNodes[state.overlayId];
+        if (spec && node) {
+          node.style.left = spec.x + "px";
+          node.style.top = spec.y + "px";
+        }
+      }
+      layoutDragSuppressClick = true;
+    }
+    if (layoutResizeState) cancelResize();
+    layoutDragState = null;
+    document.documentElement.classList.remove("is-layout-dragging");
+  }
+
+  function startResize(event) {
+    if (!editingEnabled || publishState.phase !== "idle") return;
+    if (!selectedLayoutTarget) return;
+    var isOverlay = selectedLayoutTarget.kind === "overlay";
+    var element = isOverlay ? overlayNodes[selectedLayoutTarget.id] : selectedLayoutTarget.element;
+    if (!element) return;
+    layoutResizeState = {
+      isOverlay: isOverlay,
+      element: element,
+      startX: event.clientX,
+      startY: event.clientY,
+      startW: element.offsetWidth,
+      startH: element.offsetHeight
+    };
+    event.preventDefault();
+    event.stopPropagation();
+    try { event.target.setPointerCapture(event.pointerId); } catch (error) {}
+  }
+
+  function applyResizeLive(event) {
+    var state = layoutResizeState;
+    var w = Math.max(16, Math.round(state.startW + event.clientX - state.startX));
+    var h = Math.max(8, Math.round(state.startH + event.clientY - state.startY));
+    state.newW = w;
+    state.newH = h;
+    state.element.style.width = w + "px";
+    state.element.style.height = h + "px";
+    positionInspector();
+    if (!state.isOverlay) positionFloatingHandle();
+  }
+
+  function commitResize() {
+    var state = layoutResizeState;
+    layoutResizeState = null;
+    if (!state || !selectedLayoutTarget || (state.newW === undefined && state.newH === undefined)) return;
+    if (state.isOverlay) {
+      var layout = ensureLayout();
+      var spec = layout.elements.find(function (el) { return el.id === selectedLayoutTarget.id; });
+      if (spec) {
+        spec.w = state.newW || spec.w;
+        spec.h = state.newH || spec.h;
+      }
+    } else {
+      var key = selectedLayoutTarget.key;
+      var layout2 = ensureLayout();
+      layout2.sizes[key] = { w: state.newW || state.startW, h: state.newH || state.startH };
+    }
+    layoutDragSuppressClick = true;
+    writeLocalEdits();
+    updateStatus();
+    positionInspector();
+    if (!state.isOverlay) positionFloatingHandle();
+  }
+
+  function cancelResize() {
+    var state = layoutResizeState;
+    if (!state) return;
+    state.element.style.removeProperty("width");
+    state.element.style.removeProperty("height");
+    applyLayout();
+    positionInspector();
+    if (!state.isOverlay) positionFloatingHandle();
   }
 
   /* ---------- GitHub API ---------- */
@@ -777,11 +1707,13 @@
     var merged = {};
     var langs = supportedLangs.slice();
     Object.keys(remote).forEach(function (lang) {
-      if (langs.indexOf(lang) === -1) langs.push(lang);
+      if (langs.indexOf(lang) === -1 && lang !== "layout") langs.push(lang);
     });
     langs.forEach(function (lang) {
       merged[lang] = Object.assign({}, remote[lang] || {}, changeSet[lang] || {});
     });
+    if (changeSet.layout !== undefined) merged.layout = changeSet.layout;
+    else if (remote.layout) merged.layout = remote.layout;
     return merged;
   }
 
@@ -917,6 +1849,48 @@
       replacements[task.lang] = replacements[task.lang] || {};
       replacements[task.lang][task.key] = { from: task.value, to: path };
     }
+
+    var uploadedByName = {};
+    var overlayTasks = [];
+    if (changeSet.layout && Array.isArray(changeSet.layout.elements)) {
+      changeSet.layout.elements.forEach(function (el) {
+        if (el && typeof el.src === "string" && el.src.indexOf("data:") === 0) overlayTasks.push(el);
+      });
+    }
+    for (var j = 0; j < overlayTasks.length; j += 1) {
+      var overlayEl = overlayTasks[j];
+      var overlayName = "ov-" + hashString(overlayEl.src) + ".jpg";
+      var overlayPath = imageDir + "/" + overlayName;
+      if (!uploadedByName[overlayName]) {
+        setStatus("正在上传叠加图片 " + (j + 1) + " / " + overlayTasks.length + "…");
+        var overlayContentPath = "/repos/" + repoSlug + "/contents/" + overlayPath + "?ref=" + encodeURIComponent(branch);
+        var overlayExisting = await ghApi("GET", overlayContentPath);
+        if (!overlayExisting.ok && overlayExisting.status !== 404) {
+          throw { status: overlayExisting.status, message: "读取仓库图片失败（HTTP " + overlayExisting.status + "）。" };
+        }
+        if (!overlayExisting.ok) {
+          var overlayBody = {
+            message: "Add site editor overlay image " + overlayName,
+            content: overlayEl.src.replace(/^data:[^,]*,/, ""),
+            branch: branch
+          };
+          var overlayPut = await ghApi("PUT", "/repos/" + repoSlug + "/contents/" + overlayPath, overlayBody);
+          if (overlayPut.status === 409) {
+            var overlayAgain = await ghApi("GET", overlayContentPath);
+            if (overlayAgain.ok && overlayAgain.data && overlayAgain.data.sha) {
+              overlayBody.sha = overlayAgain.data.sha;
+              overlayPut = await ghApi("PUT", "/repos/" + repoSlug + "/contents/" + overlayPath, overlayBody);
+            }
+          }
+          if (overlayPut.status === 401) throw { status: 401 };
+          if (!overlayPut.ok) throw { status: overlayPut.status, message: "叠加图片上传失败（HTTP " + overlayPut.status + "）。" };
+        }
+        uploadedByName[overlayName] = true;
+      }
+      replacements.layout = replacements.layout || {};
+      replacements.layout[overlayEl.id] = { from: overlayEl.src, to: overlayPath };
+      overlayEl.src = overlayPath;
+    }
     return replacements;
   }
 
@@ -947,6 +1921,7 @@
   async function publish() {
     if (publishState.phase !== "idle") return;
     if (activeTextRecord) commitTextEditing(true);
+    if (activeOverlayText) commitOverlayTextEditing(true);
     closeImageEditor();
     closeTokenPanel();
     if (!readToken()) {
@@ -1028,8 +2003,16 @@
       });
       edits[lang] = Object.assign({}, committed[lang], edits[lang]);
     });
+    if (replacements.layout && edits.layout) {
+      Object.keys(replacements.layout).forEach(function (id) {
+        var replacement = replacements.layout[id];
+        edits.layout.elements.forEach(function (el) {
+          if (el.id === id && el.src === replacement.from) el.src = replacement.to;
+        });
+      });
+    }
     writeLocalEdits();
-    applyEdits();
+    applyAll();
 
     if (!/^https?:$/.test(window.location.protocol)) {
       setBusy("idle");
@@ -1051,7 +2034,9 @@
       supportedLangs.forEach(function (lang) {
         edits[lang] = Object.assign({}, remoteEdits[lang] || {}, local[lang] || {});
       });
-      applyEdits();
+      if (local.layout) edits.layout = normalizeLayout(local.layout);
+      else if (remoteEdits.layout) edits.layout = normalizeLayout(remoteEdits.layout);
+      applyAll();
       updateStatus();
     } catch (error) {
       setStatus("线上内容暂未加载，发布前请先打开线上网址。", "error");
@@ -1069,17 +2054,23 @@
     captureBaseline(activeLang);
     setLangButtons();
     updateStatus();
+    updateLayoutButtons();
   }
 
   function closeEditor() {
     if (activeTextRecord) commitTextEditing(true);
+    if (activeOverlayText) commitOverlayTextEditing(true);
     closeImageEditor();
     closeTokenPanel();
+    closeAddElementMenu();
+    closeHiddenRestorePanel();
+    clearLayoutSelection();
     editingEnabled = false;
     editorBar.hidden = true;
     editorBar.setAttribute("aria-hidden", "true");
     document.documentElement.classList.remove("is-editing-site");
     setStatus("");
+    updateLayoutButtons();
     if (window.location.hash === "#editor") {
       try {
         history.replaceState(null, "", window.location.pathname + window.location.search);
@@ -1101,14 +2092,19 @@
     }
     if (!window.confirm("确定撤销 " + n + " 处未发布的本地修改？页面会恢复到最近一次发布的内容。")) return;
     if (activeTextRecord) commitTextEditing(false);
+    if (activeOverlayText) commitOverlayTextEditing(false);
     closeImageEditor();
+    clearLayoutSelection();
     edits = {};
     supportedLangs.forEach(function (lang) {
       edits[lang] = Object.assign({}, remoteEdits[lang] || {});
     });
+    if (remoteEdits.layout) edits.layout = normalizeLayout(remoteEdits.layout);
+    layoutTouched = Boolean(edits.layout);
     writeLocalEdits();
-    applyEdits();
+    applyAll();
     updateStatus();
+    updateLayoutButtons();
   }
 
   /* ---------- event wiring ---------- */
@@ -1128,6 +2124,11 @@
           commitTextEditing(false);
           return;
         }
+        if (activeOverlayText) {
+          event.preventDefault();
+          commitOverlayTextEditing(false);
+          return;
+        }
         if (!imagePanel.hidden) {
           closeImageEditor();
           return;
@@ -1136,34 +2137,82 @@
           closeTokenPanel();
           return;
         }
+        if (!addMenu.hidden) {
+          closeAddElementMenu();
+          return;
+        }
+        if (!hiddenPanel.hidden) {
+          closeHiddenRestorePanel();
+          return;
+        }
+        if (selectedLayoutTarget) {
+          clearLayoutSelection();
+          return;
+        }
       }
-      if (activeTextRecord && event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      if (activeTextRecord && event.key === "Enter" && shortcut) {
         event.preventDefault();
         commitTextEditing(true);
+        return;
+      }
+      if (activeOverlayText && event.key === "Enter" && shortcut) {
+        event.preventDefault();
+        commitOverlayTextEditing(true);
+        return;
+      }
+      if ((event.key === "Delete" || event.key === "Backspace") && selectedLayoutTarget && !activeTextRecord && !activeOverlayText) {
+        var activeNode = event.target;
+        var isTypingContext = activeNode && activeNode.closest && activeNode.closest("input, textarea, [contenteditable]");
+        if (!isTypingContext) {
+          event.preventDefault();
+          deleteSelectedLayoutTarget();
+        }
       }
     });
 
     document.addEventListener("focusout", function (event) {
-      if (!activeTextRecord) return;
-      if (event.target !== activeTextRecord.element) return;
-      commitTextEditing(true);
+      if (activeTextRecord && event.target === activeTextRecord.element) {
+        commitTextEditing(true);
+        return;
+      }
+      if (activeOverlayText && event.target === activeOverlayText.node) {
+        commitOverlayTextEditing(true);
+      }
     });
 
     document.addEventListener("click", function (event) {
       var target = event.target;
       if (!target || !target.closest) return;
-      var toolTarget = target.closest("#siteEditor, #inlineImageEditor, #inlineTokenPanel");
+      if (layoutDragSuppressClick) {
+        layoutDragSuppressClick = false;
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      var toolTarget = target.closest("#siteEditor, #inlineImageEditor, #inlineTokenPanel, #layoutInspector, #addElementMenu, #hiddenRestorePanel, .nwd-handle");
       if (toolTarget) return;
 
       if (!editingEnabled) return;
       if (target.closest("[data-set-lang]")) {
         if (activeTextRecord) commitTextEditing(true);
+        if (activeOverlayText) commitOverlayTextEditing(true);
         restoreEditsBeforeLanguageSwitch(activeLang);
+        return;
+      }
+
+      var overlayNode = target.closest(".nwd-ov");
+      if (overlayNode) {
+        if (activeOverlayText && activeOverlayText.node === overlayNode) return;
+        event.preventDefault();
+        event.stopPropagation();
+        var overlayId = overlayNode.getAttribute("data-ov-id");
+        if (layoutSpecById(overlayId)) selectLayoutTarget({ kind: "overlay", id: overlayId });
         return;
       }
 
       var textElement = target.closest("[data-editor-type='text']");
       var imageElement = target.closest("[data-editor-type='image']");
+      var moveElement = target.closest("[data-move-key]");
 
       if (textElement) {
         event.preventDefault();
@@ -1177,10 +2226,26 @@
       if (imageElement) {
         event.preventDefault();
         event.stopPropagation();
+        selectLayoutTarget({ kind: "existing", key: imageElement.getAttribute("data-editor-key"), element: imageElement });
         var imageRecord = imageRecords.find(function (item) { return item.element === imageElement; });
         if (imageRecord) openImageEditor(imageRecord);
         return;
       }
+
+      if (moveElement) {
+        event.preventDefault();
+        event.stopPropagation();
+        var moveKey = moveElement.getAttribute("data-move-key");
+        if (selectedLayoutTarget && selectedLayoutTarget.kind === "existing" && selectedLayoutTarget.key === moveKey) {
+          clearLayoutSelection();
+        } else {
+          selectLayoutTarget({ kind: "existing", key: moveKey, element: moveElement });
+        }
+        return;
+      }
+
+      if (selectedLayoutTarget) clearLayoutSelection();
+      closeAddElementMenu();
 
       if (target.closest("a, button, [data-route], [data-job-id]")) {
         event.preventDefault();
@@ -1203,6 +2268,55 @@
       }
     });
 
+    document.addEventListener("dblclick", function (event) {
+      if (!editingEnabled) return;
+      var target = event.target;
+      if (!target || !target.closest) return;
+      var node = target.closest(".nwd-ov-text, .nwd-ov-bubble");
+      if (!node) return;
+      var spec = layoutSpecById(node.getAttribute("data-ov-id"));
+      if (!spec) return;
+      event.preventDefault();
+      event.stopPropagation();
+      selectLayoutTarget({ kind: "overlay", id: spec.id });
+      openOverlayTextEditing(spec);
+    });
+
+    document.addEventListener("contextmenu", function (event) {
+      if (!editingEnabled) return;
+      var target = event.target;
+      if (!target || !target.closest) return;
+      if (target.closest("[contenteditable]")) return;
+      if (target.closest("#siteEditor, #inlineImageEditor, #inlineTokenPanel, #layoutInspector, #addElementMenu, #hiddenRestorePanel")) return;
+      var overlayNode = target.closest(".nwd-ov");
+      var stamped = overlayNode || target.closest("[data-editor-key], [data-move-key]");
+      if (!stamped) return;
+      event.preventDefault();
+      if (overlayNode) {
+        var overlayId = overlayNode.getAttribute("data-ov-id");
+        if (layoutSpecById(overlayId)) selectLayoutTarget({ kind: "overlay", id: overlayId });
+      } else {
+        var stampedKey = stamped.getAttribute("data-editor-key") || stamped.getAttribute("data-move-key");
+        if (stampedKey) selectLayoutTarget({ kind: "existing", key: stampedKey, element: stamped });
+      }
+    });
+
+    document.addEventListener("pointerdown", function (event) {
+      var target = event.target;
+      if (!target || !target.classList || !target.classList.contains("nwd-handle")) return;
+      startResize(event);
+    }, true);
+    document.addEventListener("pointerdown", onLayoutPointerDown, true);
+    document.addEventListener("pointermove", onLayoutPointerMove, true);
+    document.addEventListener("pointerup", onLayoutPointerUp, true);
+    document.addEventListener("pointercancel", onLayoutPointerCancel, true);
+
+    window.addEventListener("scroll", function () {
+      if (!editingEnabled) return;
+      positionInspector();
+      positionFloatingHandle();
+    }, true);
+
     window.addEventListener("beforeunload", function (event) {
       if (countUnsyncedChanges() > 0) {
         event.preventDefault();
@@ -1213,6 +2327,13 @@
     revertButton.addEventListener("click", revertLocalEdits);
     publishButton.addEventListener("click", publish);
     connectButton.addEventListener("click", openTokenPanel);
+    addElementButton.addEventListener("click", toggleAddElementMenu);
+    hiddenRestoreButton.addEventListener("click", renderHiddenRestorePanel);
+    addMenu.addEventListener("click", function (event) {
+      var item = event.target.closest && event.target.closest("[data-add-type]");
+      if (!item) return;
+      createOverlayElement(item.getAttribute("data-add-type"));
+    });
     editorBar.querySelector("#closeInlineEditor").addEventListener("click", closeEditor);
 
     tokenPanel.querySelector("#openTokenPage").addEventListener("click", function () {
@@ -1292,6 +2413,10 @@
       if (editingEnabled && !imagePanel.hidden && imageState.image) {
         window.requestAnimationFrame(prepareCropCanvas);
       }
+      if (editingEnabled) {
+        positionInspector();
+        positionFloatingHandle();
+      }
     });
 
     window.addEventListener("hashchange", function () {
@@ -1304,6 +2429,7 @@
   buildToolbar();
   buildImagePanel();
   buildTokenPanel();
+  buildLayoutUI();
   wireEvents();
 
   try {
@@ -1315,8 +2441,13 @@
 
   buildCatalog();
   edits = readLocalEdits();
+  if (edits.layout) {
+    edits.layout = normalizeLayout(edits.layout);
+    layoutTouched = true;
+  }
   setLangButtons();
   applyEdits();
+  applyLayout();
   loadRemoteEdits();
 
   if (window.location.hash === "#editor") openEditor();
