@@ -1,0 +1,40 @@
+name: Apply inline site edit
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: site-edit-issue-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  apply:
+    if: |
+      github.event.issue.state == 'open' &&
+      github.event.issue.user.login == github.repository_owner &&
+      startsWith(github.event.issue.title, 'content-edit:')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply editor payload
+        run: |
+          ISSUE_BODY_DECODED="$(printf '%s' "$ISSUE_BODY" | jq -r .)"
+          ISSUE_BODY="$ISSUE_BODY_DECODED" node .github/scripts/apply-issue-edit.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_BODY: ${{ toJson(github.event.issue.body) }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+
+      - name: Close request issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          ISSUE_IDS="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search 'content-edit: in:title' --json number --jq '.[].number' | tr '\n' ' ')"
+          for ISSUE_ID in $ISSUE_IDS; do gh issue close "$ISSUE_ID" --reason completed; done
