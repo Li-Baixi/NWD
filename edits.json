@@ -12,5 +12,26 @@
     "text:benefits:h3::2": "年度学习基金test"
   },
   "zh-HK": {},
-  "en": {}
+  "en": {},
+  "layout": {
+    "moves": {
+      "el:employer-brand:div:brand-split:0": {
+        "dx": 285,
+        "dy": 1
+      },
+      "el:employer-brand:div:image-frame:0": {
+        "dx": 63,
+        "dy": -4
+      }
+    },
+    "sizes": {},
+    "hidden": [
+      "el:philosophy:article:principle-card:0",
+      "el:philosophy:article:principle-card:2",
+      "el:philosophy:article:principle-card:1",
+      "el:philosophy:article:principle-card:3",
+      "el:employer-brand:div:brand-copy-block:0"
+    ],
+    "elements": []
+  }
 }
