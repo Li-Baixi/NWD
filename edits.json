@@ -6,7 +6,9 @@
     "text:philosophy:span:principle-number:2": "03",
     "text:view-home:li::2": "成果导向评估test",
     "image:benefit-flexible.jpg": "assets/edits/benefit-flexible-b8fb61ac.jpg",
-    "text:benefits:h3::0": "弹性工作安排test"
+    "text:benefits:h3::0": "弹性工作安排test",
+    "image:benefit-health.jpg": "assets/edits/benefit-health-b8fb61ac.jpg",
+    "text:benefits:h3::1": "健康与家庭保障test"
   },
   "zh-HK": {},
   "en": {}
