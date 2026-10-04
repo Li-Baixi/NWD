@@ -780,6 +780,24 @@ html.is-editing-site main [data-move-key]:hover {
   outline-offset: 2px;
   cursor: grab;
 }
+
+.ed-guide {
+  position: absolute;
+  z-index: 9990;
+  pointer-events: none;
+}
+.ed-guide-v {
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1px dashed rgba(166, 25, 46, 0.9);
+}
+.ed-guide-h {
+  left: 0;
+  right: 0;
+  height: 0;
+  border-top: 1px dashed rgba(166, 25, 46, 0.9);
+}
 html.is-editing-site main .is-layout-selected[data-move-key],
 html.is-editing-site main [data-move-key].is-layout-selected {
   cursor: move;

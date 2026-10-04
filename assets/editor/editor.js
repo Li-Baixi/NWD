@@ -1478,7 +1478,9 @@
       startY: event.clientY,
       dragging: false,
       dx: 0,
-      dy: 0
+      dy: 0,
+      snapX: 0,
+      snapY: 0
     };
     if (layoutDragState.kind === "existing") {
       var effective = edits.layout && edits.layout.moves ? edits.layout.moves[layoutDragState.key] : null;
@@ -1504,15 +1506,39 @@
     }
     layoutDragState.dx = dx;
     layoutDragState.dy = dy;
+    var host = layoutDragState.kind === "overlay" ? snapHostForOverlay(layoutDragState.overlayId) : snapHostForElement(layoutDragState.target);
+    var hostRect = host ? host.getBoundingClientRect() : null;
+    var movingRect = null;
+    var overlaySpec = null;
+    var overlayNode = null;
     if (layoutDragState.kind === "existing") {
       layoutDragState.target.style.translate = (layoutDragState.baseDx + dx) + "px " + (layoutDragState.baseDy + dy) + "px";
+      var liveRect = layoutDragState.target.getBoundingClientRect();
+      movingRect = { left: liveRect.left, top: liveRect.top, width: liveRect.width, height: liveRect.height };
     } else {
-      var spec = layoutSpecById(layoutDragState.overlayId);
-      var node = overlayNodes[layoutDragState.overlayId];
-      if (spec && node) {
-        node.style.left = (spec.x + dx) + "px";
-        node.style.top = (spec.y + dy) + "px";
+      overlaySpec = layoutSpecById(layoutDragState.overlayId);
+      overlayNode = overlayNodes[layoutDragState.overlayId];
+      if (overlaySpec && overlayNode && hostRect) {
+        movingRect = { left: hostRect.left + overlaySpec.x + dx, top: hostRect.top + overlaySpec.y + dy, width: overlaySpec.w, height: overlaySpec.h };
       }
+    }
+    if (host && hostRect && movingRect) {
+      var snap = computeDragSnap(layoutDragState, movingRect, host, hostRect);
+      layoutDragState.snapX = snap.x;
+      layoutDragState.snapY = snap.y;
+      if (layoutDragState.kind === "existing") {
+        if (snap.x || snap.y) {
+          layoutDragState.target.style.translate = (layoutDragState.baseDx + dx + snap.x) + "px " + (layoutDragState.baseDy + dy + snap.y) + "px";
+        }
+      } else if (overlaySpec && overlayNode) {
+        overlayNode.style.left = (overlaySpec.x + dx + snap.x) + "px";
+        overlayNode.style.top = (overlaySpec.y + dy + snap.y) + "px";
+      }
+      renderSnapGuides(host, snap.guides);
+    } else {
+      layoutDragState.snapX = 0;
+      layoutDragState.snapY = 0;
+      clearSnapGuides();
     }
     if (selectedLayoutTarget) positionInspector();
     if (selectedLayoutTarget && selectedLayoutTarget.kind === "existing") positionFloatingHandle();
@@ -1532,9 +1558,10 @@
     } catch (error) {}
     if (!state.dragging) return;
     layoutDragSuppressClick = true;
+    clearSnapGuides();
     if (state.kind === "existing") {
-      var dx = Math.round(state.baseDx + (event.clientX - state.startX));
-      var dy = Math.round(state.baseDy + (event.clientY - state.startY));
+      var dx = Math.round(state.baseDx + state.dx + (state.snapX || 0));
+      var dy = Math.round(state.baseDy + state.dy + (state.snapY || 0));
       var layout = ensureLayout();
       if (dx || dy) layout.moves[state.key] = { dx: dx, dy: dy };
       else delete layout.moves[state.key];
@@ -1545,8 +1572,8 @@
       var layout2 = ensureLayout();
       var spec = layout2.elements.find(function (el) { return el.id === state.overlayId; });
       if (spec) {
-        spec.x = Math.round(spec.x + state.dx);
-        spec.y = Math.round(spec.y + state.dy);
+        spec.x = Math.round(spec.x + state.dx + (state.snapX || 0));
+        spec.y = Math.round(spec.y + state.dy + (state.snapY || 0));
       }
       writeLocalEdits();
       updateStatus();
@@ -1555,6 +1582,7 @@
   }
 
   function onLayoutPointerCancel(event) {
+    clearSnapGuides();
     if (layoutDragState && layoutDragState.dragging) {
       var state = layoutDragState;
       if (state.kind === "existing") {
@@ -1595,12 +1623,22 @@
 
   function applyResizeLive(event) {
     var state = layoutResizeState;
-    var w = Math.max(16, Math.round(state.startW + event.clientX - state.startX));
-    var h = Math.max(8, Math.round(state.startH + event.clientY - state.startY));
+    var rawW = Math.max(16, Math.round(state.startW + event.clientX - state.startX));
+    var rawH = Math.max(8, Math.round(state.startH + event.clientY - state.startY));
+    var host = state.isOverlay
+      ? snapHostForOverlay(selectedLayoutTarget && selectedLayoutTarget.id)
+      : snapHostForElement(state.element);
+    var hostRect = host ? host.getBoundingClientRect() : null;
+    var snap = { w: 0, h: 0, guides: [] };
+    if (host && hostRect) snap = computeResizeSnap(state, rawW, rawH, host, hostRect);
+    var w = Math.max(8, Math.round(rawW + snap.w));
+    var h = Math.max(4, Math.round(rawH + snap.h));
     state.newW = w;
     state.newH = h;
     state.element.style.width = w + "px";
     state.element.style.height = h + "px";
+    if (host && hostRect) renderSnapGuides(host, snap.guides);
+    else clearSnapGuides();
     positionInspector();
     if (!state.isOverlay) positionFloatingHandle();
   }
@@ -1608,6 +1646,7 @@
   function commitResize() {
     var state = layoutResizeState;
     layoutResizeState = null;
+    clearSnapGuides();
     if (!state || !selectedLayoutTarget || (state.newW === undefined && state.newH === undefined)) return;
     if (state.isOverlay) {
       var layout = ensureLayout();
@@ -1630,12 +1669,166 @@
 
   function cancelResize() {
     var state = layoutResizeState;
+    layoutResizeState = null;
+    clearSnapGuides();
     if (!state) return;
     state.element.style.removeProperty("width");
     state.element.style.removeProperty("height");
     applyLayout();
     positionInspector();
     if (!state.isOverlay) positionFloatingHandle();
+  }
+
+  /* ---------- layout editing: snap guides ---------- */
+
+  var SNAP_THRESHOLD = 7;
+  var guideNodes = [];
+  var guideHostNode = null;
+
+  function clearSnapGuides() {
+    guideNodes.forEach(function (node) { node.remove(); });
+    guideNodes = [];
+    if (guideHostNode) {
+      if (guideHostNode.hasAttribute("data-ed-guide-host") && !guideHostNode.hasAttribute("data-ed-layout-host")) {
+        guideHostNode.removeAttribute("data-ed-guide-host");
+        guideHostNode.style.removeProperty("position");
+      }
+      guideHostNode = null;
+    }
+  }
+
+  function snapHostForOverlay(overlayId) {
+    var spec = layoutSpecById(overlayId);
+    return spec ? resolveAnchor(spec.anchor) : null;
+  }
+
+  function snapHostForElement(element) {
+    if (!element || !element.closest) return null;
+    return element.closest("main section") || element.closest("footer") || null;
+  }
+
+  function guideBoxRect(host) {
+    if (!host) return null;
+    var inner = host.querySelector(":scope > .container-wide, :scope > .hero-content");
+    if (inner) {
+      var innerRect = inner.getBoundingClientRect();
+      if (innerRect.width > 80 && innerRect.height > 40) return innerRect;
+    }
+    return host.getBoundingClientRect();
+  }
+
+  function snapCandidates(box, siblings, axis) {
+    var list = [];
+    if (axis === "x") {
+      list.push(box.left, box.left + box.width / 2, box.left + box.width);
+      siblings.forEach(function (rect) {
+        list.push(rect.left, rect.left + rect.width / 2, rect.left + rect.width);
+      });
+    } else {
+      list.push(box.top, box.top + box.height / 2, box.top + box.height);
+      siblings.forEach(function (rect) {
+        list.push(rect.top, rect.top + rect.height / 2, rect.top + rect.height);
+      });
+    }
+    return list;
+  }
+
+  function pickSnap(edges, candidates) {
+    var best = null;
+    for (var i = 0; i < edges.length; i += 1) {
+      for (var j = 0; j < candidates.length; j += 1) {
+        var diff = candidates[j] - edges[i];
+        if (Math.abs(diff) < (best ? Math.abs(best.diff) : SNAP_THRESHOLD)) {
+          best = { diff: diff, at: candidates[j] };
+        }
+      }
+    }
+    return best;
+  }
+
+  function overlaySiblings(host, selfId) {
+    var rects = [];
+    if (!host) return rects;
+    Object.keys(overlayNodes).forEach(function (id) {
+      if (id === selfId) return;
+      var node = overlayNodes[id];
+      if (!node || node.parentNode !== host) return;
+      rects.push(node.getBoundingClientRect());
+    });
+    return rects;
+  }
+
+  function computeDragSnap(state, movingRect, host, hostRect) {
+    var snap = { x: 0, y: 0, guides: [] };
+    var box = guideBoxRect(host);
+    if (!box) return snap;
+    var siblings = state.kind === "overlay" ? overlaySiblings(host, state.overlayId) : [];
+    var snapX = pickSnap(
+      [movingRect.left, movingRect.left + movingRect.width / 2, movingRect.left + movingRect.width],
+      snapCandidates(box, siblings, "x")
+    );
+    if (snapX) {
+      snap.x = snapX.diff;
+      snap.guides.push({ axis: "v", pos: snapX.at - hostRect.left });
+    }
+    var snapY = pickSnap(
+      [movingRect.top, movingRect.top + movingRect.height / 2, movingRect.top + movingRect.height],
+      snapCandidates(box, siblings, "y")
+    );
+    if (snapY) {
+      snap.y = snapY.diff;
+      snap.guides.push({ axis: "h", pos: snapY.at - hostRect.top });
+    }
+    return snap;
+  }
+
+  function computeResizeSnap(state, rawW, rawH, host, hostRect) {
+    var snap = { w: 0, h: 0, guides: [] };
+    var box = guideBoxRect(host);
+    if (!box) return snap;
+    var selfId = selectedLayoutTarget && selectedLayoutTarget.kind === "overlay" ? selectedLayoutTarget.id : null;
+    var siblings = selfId ? overlaySiblings(host, selfId) : [];
+    var rightEdge;
+    var bottomEdge;
+    if (state.isOverlay) {
+      var spec = layoutSpecById(selfId);
+      if (!spec) return snap;
+      rightEdge = hostRect.left + spec.x + rawW;
+      bottomEdge = hostRect.top + spec.y + rawH;
+    } else {
+      var rect = state.element.getBoundingClientRect();
+      rightEdge = rect.left + rawW;
+      bottomEdge = rect.top + rawH;
+    }
+    var snapX = pickSnap([rightEdge], snapCandidates(box, siblings, "x"));
+    if (snapX) {
+      snap.w = snapX.diff;
+      snap.guides.push({ axis: "v", pos: snapX.at - hostRect.left });
+    }
+    var snapY = pickSnap([bottomEdge], snapCandidates(box, siblings, "y"));
+    if (snapY) {
+      snap.h = snapY.diff;
+      snap.guides.push({ axis: "h", pos: snapY.at - hostRect.top });
+    }
+    return snap;
+  }
+
+  function renderSnapGuides(host, guides) {
+    clearSnapGuides();
+    if (!host || !guides.length) return;
+    if (getComputedStyle(host).position === "static") {
+      host.setAttribute("data-ed-guide-host", "");
+      host.style.position = "relative";
+      guideHostNode = host;
+    }
+    guides.forEach(function (guide) {
+      var node = document.createElement("div");
+      node.className = "ed-guide ed-guide-" + guide.axis;
+      if (guide.axis === "v") node.style.left = Math.round(guide.pos) + "px";
+      else node.style.top = Math.round(guide.pos) + "px";
+      host.appendChild(node);
+      guideNodes.push(node);
+    });
   }
 
   /* ---------- GitHub API ---------- */
@@ -2065,6 +2258,7 @@
     closeAddElementMenu();
     closeHiddenRestorePanel();
     clearLayoutSelection();
+    clearSnapGuides();
     editingEnabled = false;
     editorBar.hidden = true;
     editorBar.setAttribute("aria-hidden", "true");

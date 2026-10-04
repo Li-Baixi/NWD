@@ -28,6 +28,7 @@ While editing is enabled:
 The editor can also move, resize, hide, and add page elements:
 
 - **Move**: drag any outlined element (dashed outline on hover). Text still opens for editing on a plain click — drag more than a few pixels to move it instead. Moves are visual offsets; the page does not reflow.
+- **Snap guides**: while dragging or resizing, the element automatically snaps to the content column's left edge, vertical center, and right edge (and the matching horizontal lines), as well as to the edges and centers of other overlay elements. A dashed guide line shows what it snapped to.
 - **Select**: click a non-text element (card, icon, arrow, badge) or right-click anything to select it. A floating toolbar appears with 重置 (undo move/resize) and 删除.
 - **Resize**: drag the small handle at the element's bottom-right corner.
 - **Delete/restore**: 删除 hides an existing element; the toolbar button 已删除 (N) lists hidden elements for one-click 恢复. `Delete`/`Backspace` also removes the current selection.
