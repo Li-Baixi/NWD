@@ -67,6 +67,10 @@
   var floatingHandle = null;
   var addElementButton = null;
   var hiddenRestoreButton = null;
+  var undoButton = null;
+  var redoButton = null;
+  var undoStack = [];
+  var redoStack = [];
   var colorPresets = ["#A6192E", "#2B070C", "#251A1C", "#6E6265", "#E45869", "#FFFFFF"];
   var imageState = {
     image: null,
@@ -103,7 +107,9 @@
       '<button type="button" data-editor-lang="zh-HK">繁</button>' +
       '<button type="button" data-editor-lang="en">EN</button>' +
       '</div>' +
-      '<button class="inline-tool-button" id="revertLocalEdits" type="button">撤销本地修改</button>' +
+      '<button class="inline-tool-button" id="undoEdit" type="button" disabled title="Ctrl+Z">撤销</button>' +
+      '<button class="inline-tool-button" id="redoEdit" type="button" disabled title="Ctrl+Shift+Z / Ctrl+Y">重做</button>' +
+      '<button class="inline-tool-button" id="revertLocalEdits" type="button">放弃全部修改</button>' +
       '<button class="inline-tool-button" id="addElement" type="button">添加 ▾</button>' +
       '<button class="inline-tool-button" id="hiddenRestore" type="button" hidden>已删除</button>' +
       '<button class="inline-tool-button" id="connectGithub" type="button">连接 GitHub</button>' +
@@ -120,6 +126,8 @@
     connectButton = aside.querySelector("#connectGithub");
     addElementButton = aside.querySelector("#addElement");
     hiddenRestoreButton = aside.querySelector("#hiddenRestore");
+    undoButton = aside.querySelector("#undoEdit");
+    redoButton = aside.querySelector("#redoEdit");
   }
 
   function buildImagePanel() {
@@ -492,6 +500,65 @@
     else setStatus("所有修改均已发布 ✓", "ok");
   }
 
+  /* ---------- undo / redo ---------- */
+
+  function pushUndoState(coalesceKey) {
+    var now = Date.now();
+    var top = undoStack[undoStack.length - 1];
+    if (coalesceKey && top && top.coalesceKey === coalesceKey && now - top.at < 800) {
+      top.at = now;
+      return;
+    }
+    undoStack.push({ coalesceKey: coalesceKey || null, at: now, snapshot: JSON.parse(JSON.stringify(edits)) });
+    if (undoStack.length > 40) undoStack.shift();
+    redoStack.length = 0;
+    updateUndoButtons();
+  }
+
+  function restoreEditsSnapshot(snapshot) {
+    edits = snapshot;
+    if (edits.layout) edits.layout = normalizeLayout(edits.layout);
+    clearLayoutSelection();
+    writeLocalEdits();
+    applyAll();
+    updateStatus();
+    updateLayoutButtons();
+    updateUndoButtons();
+  }
+
+  function undoEdit() {
+    if (!editingEnabled || publishState.phase !== "idle" || !undoStack.length) return;
+    if (layoutDragState && layoutDragState.dragging) return;
+    if (layoutResizeState) return;
+    if (activeTextRecord) commitTextEditing(true);
+    if (activeOverlayText) commitOverlayTextEditing(true);
+    var entry = undoStack.pop();
+    if (!entry) return;
+    redoStack.push({ coalesceKey: null, at: Date.now(), snapshot: JSON.parse(JSON.stringify(edits)) });
+    restoreEditsSnapshot(entry.snapshot);
+    setStatus("已撤销一步（还可撤销 " + undoStack.length + " 步）。", "ok");
+  }
+
+  function redoEdit() {
+    if (!editingEnabled || publishState.phase !== "idle" || !redoStack.length) return;
+    if (layoutDragState && layoutDragState.dragging) return;
+    if (layoutResizeState) return;
+    if (activeTextRecord) commitTextEditing(true);
+    if (activeOverlayText) commitOverlayTextEditing(true);
+    var entry = redoStack.pop();
+    if (!entry) return;
+    undoStack.push({ coalesceKey: null, at: Date.now(), snapshot: JSON.parse(JSON.stringify(edits)) });
+    restoreEditsSnapshot(entry.snapshot);
+    setStatus("已重做一步（还可重做 " + redoStack.length + " 步）。", "ok");
+  }
+
+  function updateUndoButtons() {
+    if (!undoButton || !redoButton) return;
+    var busy = publishState.phase !== "idle";
+    undoButton.disabled = busy || !undoStack.length;
+    redoButton.disabled = busy || !redoStack.length;
+  }
+
   function setBusy(phase) {
     publishState.phase = phase;
     var busy = phase !== "idle";
@@ -506,6 +573,7 @@
     document.querySelectorAll("[data-editor-lang]").forEach(function (button) {
       button.disabled = busy;
     });
+    updateUndoButtons();
   }
 
   /* ---------- text editing ---------- */
@@ -540,6 +608,7 @@
     record.element.removeAttribute("contenteditable");
     setLeafText(record.element, valueToApply);
     if (save && value !== record.savedText) {
+      pushUndoState("text:" + activeLang + ":" + record.key);
       edits[activeLang] = edits[activeLang] || {};
       edits[activeLang][record.key] = value;
       writeLocalEdits();
@@ -751,6 +820,7 @@
     if (imageEditTarget) {
       var overlaySpec = overlaySpecForEdit(imageEditTarget.overlayId);
       if (overlaySpec) {
+        pushUndoState("ovimage:" + imageEditTarget.overlayId);
         overlaySpec.src = value;
         updateOverlayElement(overlaySpec);
         writeLocalEdits();
@@ -760,6 +830,7 @@
       return;
     }
     if (!activeImageRecord) return;
+    pushUndoState("image:" + activeLang + ":" + activeImageRecord.key);
     edits[activeLang] = edits[activeLang] || {};
     edits[activeLang][activeImageRecord.key] = value;
     writeLocalEdits();
@@ -1184,6 +1255,7 @@
       swatch.style.background = color;
       swatch.title = color;
       swatch.addEventListener("click", function () {
+        if (spec.color !== color) pushUndoState("ovcolor:" + spec.id);
         spec.color = color;
         writeLocalEdits();
         updateStatus();
@@ -1196,15 +1268,18 @@
     inspectorBar.appendChild(swatchRow);
     if (spec.type === "arrow" || spec.type === "line" || spec.type === "rect") {
       appendInspectorButton("旋转", function () {
+        pushUndoState("ovrot:" + spec.id);
         spec.rot = ((spec.rot || 0) + 45) % 360;
         writeLocalEdits(); updateStatus(); updateOverlayElement(spec); positionInspector();
       });
     }
     appendInspectorButton("上移层", function () {
+      pushUndoState("ovz:" + spec.id);
       spec.z = Math.min(99, (spec.z || 6) + 1);
       writeLocalEdits(); updateStatus(); updateOverlayElement(spec);
     });
     appendInspectorButton("下移层", function () {
+      pushUndoState("ovz:" + spec.id);
       spec.z = Math.max(1, (spec.z || 6) - 1);
       writeLocalEdits(); updateStatus(); updateOverlayElement(spec);
     });
@@ -1218,6 +1293,7 @@
       setStatus("该元素没有本地调整。", "ok");
       return;
     }
+    if (edits.layout.moves[key] || edits.layout.sizes[key]) pushUndoState("reset:" + key);
     delete edits.layout.moves[key];
     delete edits.layout.sizes[key];
     clearLayoutSelection();
@@ -1231,6 +1307,7 @@
     if (selectedLayoutTarget.kind === "overlay") {
       var layout = ensureLayout();
       var removedId = selectedLayoutTarget.id;
+      pushUndoState("ovdelete:" + removedId);
       layout.elements = layout.elements.filter(function (el) { return el.id !== removedId; });
       clearLayoutSelection();
       writeLocalEdits();
@@ -1241,7 +1318,10 @@
     }
     var existingLayout = ensureLayout();
     var existingKey = selectedLayoutTarget.key;
-    if (existingLayout.hidden.indexOf(existingKey) === -1) existingLayout.hidden.push(existingKey);
+    if (existingLayout.hidden.indexOf(existingKey) === -1) {
+      pushUndoState("hide:" + existingKey);
+      existingLayout.hidden.push(existingKey);
+    }
     clearLayoutSelection();
     writeLocalEdits();
     updateStatus();
@@ -1255,6 +1335,7 @@
     copy.id = generateOverlayId();
     copy.x += 16;
     copy.y += 16;
+    pushUndoState();
     layout.elements.push(copy);
     writeLocalEdits();
     updateStatus();
@@ -1347,6 +1428,7 @@
       });
     }
     var layout = ensureLayout();
+    pushUndoState();
     layout.elements.push(spec);
     writeLocalEdits();
     updateStatus();
@@ -1380,6 +1462,7 @@
       restore.textContent = "恢复";
       restore.addEventListener("click", function () {
         var editLayout = ensureLayout();
+        if (editLayout.hidden.indexOf(key) !== -1) pushUndoState("unhide:" + key);
         editLayout.hidden = editLayout.hidden.filter(function (item) { return item !== key; });
         writeLocalEdits();
         updateStatus();
@@ -1428,7 +1511,8 @@
     record.node.removeAttribute("contenteditable");
     if (save) {
       var spec = overlaySpecForEdit(record.spec.id);
-      if (spec) {
+      if (spec && value !== record.saved) {
+        pushUndoState("ovtext:" + activeLang + ":" + record.spec.id);
         spec.text = spec.text || {};
         spec.text[activeLang] = value;
         writeLocalEdits();
@@ -1563,7 +1647,10 @@
       var dx = Math.round(state.baseDx + state.dx + (state.snapX || 0));
       var dy = Math.round(state.baseDy + state.dy + (state.snapY || 0));
       var layout = ensureLayout();
-      if (dx || dy) layout.moves[state.key] = { dx: dx, dy: dy };
+      var previousMove = layout.moves[state.key] || null;
+      var nextMove = (dx || dy) ? { dx: dx, dy: dy } : null;
+      if (previousMove || nextMove) pushUndoState("move:" + state.key);
+      if (nextMove) layout.moves[state.key] = nextMove;
       else delete layout.moves[state.key];
       writeLocalEdits();
       updateStatus();
@@ -1572,8 +1659,13 @@
       var layout2 = ensureLayout();
       var spec = layout2.elements.find(function (el) { return el.id === state.overlayId; });
       if (spec) {
-        spec.x = Math.round(spec.x + state.dx + (state.snapX || 0));
-        spec.y = Math.round(spec.y + state.dy + (state.snapY || 0));
+        var netDx = Math.round(state.dx + (state.snapX || 0));
+        var netDy = Math.round(state.dy + (state.snapY || 0));
+        if (netDx || netDy) {
+          pushUndoState("ovmove:" + state.overlayId);
+          spec.x = Math.round(spec.x + netDx);
+          spec.y = Math.round(spec.y + netDy);
+        }
       }
       writeLocalEdits();
       updateStatus();
@@ -1652,12 +1744,15 @@
       var layout = ensureLayout();
       var spec = layout.elements.find(function (el) { return el.id === selectedLayoutTarget.id; });
       if (spec) {
+        if (state.newW !== spec.w || state.newH !== spec.h) pushUndoState("ovsize:" + selectedLayoutTarget.id);
         spec.w = state.newW || spec.w;
         spec.h = state.newH || spec.h;
       }
     } else {
       var key = selectedLayoutTarget.key;
       var layout2 = ensureLayout();
+      var previousSize = layout2.sizes[key];
+      if (!previousSize || previousSize.w !== state.newW || previousSize.h !== state.newH) pushUndoState("size:" + key);
       layout2.sizes[key] = { w: state.newW || state.startW, h: state.newH || state.startH };
     }
     layoutDragSuppressClick = true;
@@ -2248,6 +2343,7 @@
     setLangButtons();
     updateStatus();
     updateLayoutButtons();
+    updateUndoButtons();
   }
 
   function closeEditor() {
@@ -2284,11 +2380,12 @@
       setStatus("没有可撤销的本地修改。", "ok");
       return;
     }
-    if (!window.confirm("确定撤销 " + n + " 处未发布的本地修改？页面会恢复到最近一次发布的内容。")) return;
+    if (!window.confirm("确定放弃 " + n + " 处未发布的本地修改？页面会恢复到最近一次发布的内容。（放弃后仍可用 撤销 找回）")) return;
     if (activeTextRecord) commitTextEditing(false);
     if (activeOverlayText) commitOverlayTextEditing(false);
     closeImageEditor();
     clearLayoutSelection();
+    pushUndoState();
     edits = {};
     supportedLangs.forEach(function (lang) {
       edits[lang] = Object.assign({}, remoteEdits[lang] || {});
@@ -2312,6 +2409,14 @@
         return;
       }
       if (!editingEnabled) return;
+      if (shortcut && !event.altKey && (event.key === "z" || event.key === "Z" || event.key === "y" || event.key === "Y")) {
+        var undoField = event.target && event.target.closest && event.target.closest("input, textarea, [contenteditable]");
+        if (undoField) return;
+        event.preventDefault();
+        if (event.shiftKey || event.key === "y" || event.key === "Y") redoEdit();
+        else undoEdit();
+        return;
+      }
       if (event.key === "Escape") {
         if (activeTextRecord) {
           event.preventDefault();
@@ -2521,6 +2626,8 @@
     revertButton.addEventListener("click", revertLocalEdits);
     publishButton.addEventListener("click", publish);
     connectButton.addEventListener("click", openTokenPanel);
+    undoButton.addEventListener("click", undoEdit);
+    redoButton.addEventListener("click", redoEdit);
     addElementButton.addEventListener("click", toggleAddElementMenu);
     hiddenRestoreButton.addEventListener("click", renderHiddenRestorePanel);
     addMenu.addEventListener("click", function (event) {

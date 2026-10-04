@@ -20,7 +20,8 @@ While editing is enabled:
 - Click any outlined text to edit it in place. Changes save to the browser instantly — click elsewhere (or press `Ctrl + Enter`) to confirm, `Esc` to cancel.
 - Click any outlined image to open the crop panel. Drag to reposition, adjust the zoom slider, then apply — the exported image keeps the page slot's ratio, so the layout never shifts.
 - The toolbar language tabs (简 / 繁 / EN) switch which language layer you are editing; each language keeps its own edits.
-- 撤销本地修改 drops all unpublished changes and restores the last published content.
+- 撤销 / 重做 step back and forward through recent edits — `Ctrl + Z` to undo, `Ctrl + Shift + Z` (or `Ctrl + Y`) to redo. Every text, image, and layout change is recorded (up to 40 steps), including 放弃全部修改. Inside a text field or inline text editing the browser's native undo applies instead.
+- 放弃全部修改 drops all unpublished changes at once and restores the last published content (still recoverable via 撤销).
 - The status area always shows how many changes are waiting to be published.
 
 ## Free layout editing
