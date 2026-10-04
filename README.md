@@ -5,36 +5,45 @@ This repository hosts a single-page recruitment site prototype for the UX/UI aca
 - Live site: https://li-baixi.github.io/NWD/
 - Main page: `index.html`
 - Images: `assets/images/`
-- Remote content edits: `edits.json`
+- Published content edits: `edits.json`
+- Editor code: `assets/editor/`
 
 ## Open the in-page editor
 
-Use one of these methods while viewing the live site:
+Use one of these methods while viewing the site:
 
 - Press `Ctrl + Shift + E` on Windows/Linux, or `Cmd + Shift + E` on macOS.
 - Add `#editor` to the end of the site URL.
 
-The normal page layout stays visible. While editing is enabled, click any outlined text or image where it appears on the page.
+While editing is enabled:
 
-- Text opens directly in place. Choose **完成** to save or **取消** to restore the previous text.
-- Images open a floating crop panel. Drag the image to reposition it and use the zoom slider. The exported image keeps the same ratio as its page slot, so the layout does not shift.
-- The toolbar supports Simplified Chinese, Traditional Chinese, and English. Each language has its own editable text layer.
+- Click any outlined text to edit it in place. Changes save to the browser instantly — click elsewhere (or press `Ctrl + Enter`) to confirm, `Esc` to cancel.
+- Click any outlined image to open the crop panel. Drag to reposition, adjust the zoom slider, then apply — the exported image keeps the page slot's ratio, so the layout never shifts.
+- The toolbar language tabs (简 / 繁 / EN) switch which language layer you are editing; each language keeps its own edits.
+- 撤销本地修改 drops all unpublished changes and restores the last published content.
+- The status area always shows how many changes are waiting to be published.
 
-When opening `index.html` directly with `file://`, browser security blocks cropping an image that is already loaded from disk. Select that image again with **从电脑选择图片** to crop it, or open the GitHub Pages URL where the same-origin images crop directly.
+## Connect GitHub (one-time setup)
 
-## Publish edits to GitHub
+Publishing needs a fine-grained personal access token scoped to this repository only:
 
-1. Edit text or images in place.
-2. Select **保存到浏览器** to preview and save locally.
-3. Select **一键发布到 GitHub**.
+1. In the editor toolbar select 连接 GitHub, then 打开令牌创建页 — the form is pre-filled (name, 90-day expiry, Contents: Read and write).
+2. Under Repository access choose **Only select repositories** and check `Li-Baixi/NWD`.
+3. Select **Generate token** and copy the token.
+4. Paste it into the panel and select 连接.
 
-The page does not require a personal access token and does not call the GitHub API from the browser.
+The token is stored only in this browser's local storage. Revoke it anytime at github.com/settings/personal-access-tokens; 断开连接 removes it from the browser.
 
-- For normal text or online image changes, GitHub opens a pre-filled issue. Confirm the account and select **Submit new issue**. A repository workflow applies the change and closes the issue automatically.
-- For large local-image changes, the page downloads an `edits-update-...json` file and opens the GitHub upload page. Drag the downloaded file into that page and select **Commit changes**. A repository workflow merges the file into `edits.json` automatically.
+## Publish changes
 
-GitHub Pages publishes the merged changes automatically.
+Select 发布 in the toolbar:
+
+1. Cropped images are committed to `assets/edits/` as real image files, keeping `edits.json` small.
+2. All pending text and image changes are merged into `edits.json` on `main`.
+3. GitHub Pages redeploys automatically — the toolbar shows 已上线 ✓ once the live site is updated (usually within a minute).
+
+If the token has expired, the editor reopens the connection panel — paste a fresh token to continue.
 
 ## Local preview
 
-Open `index.html` directly in a browser. Browser-only edits still work.
+Open `index.html` directly in a browser. Editing and local saving work, and publishing works too. On `file://` the remote `edits.json` is not loaded, and cropping an image already loaded from disk is blocked by browser security — re-select it with 从电脑选择图片 to crop it.
